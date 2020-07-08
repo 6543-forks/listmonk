@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"html/template"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -35,6 +39,14 @@ type App struct {
 	media     media.Store
 	notifTpls *template.Template
 	log       *log.Logger
+
+	// Channel for passing reload signals.
+	sigChan chan os.Signal
+
+	// Global variable that stores the state indicating that a restart is required
+	// after a settings update.
+	needsRestart bool
+	sync.Mutex
 }
 
 var (
@@ -143,6 +155,32 @@ func main() {
 	// messages) get processed at the specified interval.
 	go app.manager.Run(time.Second * 5)
 
-	// Start and run the app server.
-	initHTTPServer(app)
+	// Start the app server.
+	srv := initHTTPServer(app)
+
+	// Wait for the reload signal with a callback to gracefully shut down resources.
+	// The `wait` channel is passed to awaitReload to wait for the callback to finish
+	// within N seconds, or do a force reload.
+	app.sigChan = make(chan os.Signal)
+	signal.Notify(app.sigChan, syscall.SIGHUP)
+
+	closerWait := make(chan bool)
+	<-awaitReload(app.sigChan, closerWait, func() {
+		// Stop the HTTP server.
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+
+		// Close the campaign manager.
+		app.manager.Close()
+
+		// Close the DB pool.
+		app.db.DB.Close()
+
+		// Close the messenger pool.
+		app.messenger.Close()
+
+		// Signal the close.
+		closerWait <- true
+	})
 }

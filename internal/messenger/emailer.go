@@ -155,3 +155,11 @@ func (e *Emailer) Push(fromAddr string, toAddr []string, subject string, m []byt
 func (e *Emailer) Flush() error {
 	return nil
 }
+
+// Close closes the SMTP pools.
+func (e *Emailer) Close() error {
+	for _, s := range e.servers {
+		s.pool.Close()
+	}
+	return nil
+}

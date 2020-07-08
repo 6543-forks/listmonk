@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/goyesql/v2"
@@ -312,7 +314,7 @@ func initNotifTemplates(path string, fs stuffbin.FileSystem, cs *constants) *tem
 }
 
 // initHTTPServer sets up and runs the app's main HTTP server and blocks forever.
-func initHTTPServer(app *App) {
+func initHTTPServer(app *App) *echo.Echo {
 	// Initialize the HTTP server.
 	var srv = echo.New()
 	srv.HideBanner = true
@@ -349,5 +351,46 @@ func initHTTPServer(app *App) {
 	registerHTTPHandlers(srv)
 
 	// Start the server.
-	srv.Logger.Fatal(srv.Start(ko.String("app.address")))
+	go func() {
+		if err := srv.Start(ko.String("app.address")); err != nil {
+			if strings.Contains(err.Error(), "Server closed") {
+				lo.Println("HTTP server shut down")
+			} else {
+				lo.Fatalf("error starting HTTP server: %v", err)
+			}
+		}
+	}()
+	return srv
+}
+
+func awaitReload(sigChan chan os.Signal, closerWait chan bool, closer func()) chan bool {
+	// The blocking signal handler that main() waits on.
+	out := make(chan bool)
+
+	// Respawn a new process and exit the running one.
+	respawn := func() {
+		if err := syscall.Exec(os.Args[0], os.Args, os.Environ()); err != nil {
+			lo.Fatalf("error spawning process: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// Listen for reload signal.
+	go func() {
+		for range sigChan {
+			lo.Println("got reload signal. restarting ...")
+
+			go closer()
+			select {
+			case <-closerWait:
+				// Wait for the closer to finish.
+				respawn()
+			case <-time.After(time.Second * 3):
+				// Or timeout and force close.
+				respawn()
+			}
+		}
+	}()
+
+	return out
 }
